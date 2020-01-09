@@ -13,6 +13,7 @@ import * as viewEvents from 'vs/editor/common/view/viewEvents';
 import { PrefixSumComputerWithCache } from 'vs/editor/common/viewModel/prefixSumComputer';
 import { ICoordinatesConverter, IOverviewRulerDecorations, ViewLineData } from 'vs/editor/common/viewModel/viewModel';
 import { ITheme } from 'vs/platform/theme/common/themeService';
+import { IDisposable } from 'vs/base/common/lifecycle';
 
 export class OutputPosition {
 	_outputPositionBrand: void;
@@ -62,10 +63,8 @@ export interface ISplitLine {
 	getViewLineNumberOfModelPosition(deltaLineNumber: number, inputColumn: number): number;
 }
 
-export interface IViewModelLinesCollection {
+export interface IViewModelLinesCollection extends IDisposable {
 	createCoordinatesConverter(): ICoordinatesConverter;
-
-	dispose(): void;
 
 	setWrappingSettings(wrappingIndent: WrappingIndent, wrappingColumn: number, columnsForFullWidthChar: number): boolean;
 	setTabSize(newTabSize: number): boolean;
@@ -130,9 +129,7 @@ export class CoordinatesConverter implements ICoordinatesConverter {
 	}
 
 	public convertModelRangeToViewRange(modelRange: Range): Range {
-		let start = this._lines.convertModelPositionToViewPosition(modelRange.startLineNumber, modelRange.startColumn);
-		let end = this._lines.convertModelPositionToViewPosition(modelRange.endLineNumber, modelRange.endColumn);
-		return new Range(start.lineNumber, start.column, end.lineNumber, end.column);
+		return this._lines.convertModelRangeToViewRange(modelRange);
 	}
 
 	public modelPositionIsVisible(modelPosition: Position): boolean {
@@ -149,20 +146,20 @@ const enum IndentGuideRepeatOption {
 
 export class SplitLinesCollection implements IViewModelLinesCollection {
 
-	private model: ITextModel;
+	private readonly model: ITextModel;
 	private _validModelVersionId: number;
 
 	private wrappingColumn: number;
 	private columnsForFullWidthChar: number;
 	private wrappingIndent: WrappingIndent;
 	private tabSize: number;
-	private lines: ISplitLine[];
+	private lines!: ISplitLine[];
 
-	private prefixSumComputer: PrefixSumComputerWithCache;
+	private prefixSumComputer!: PrefixSumComputerWithCache;
 
-	private linePositionMapperFactory: ILineMapperFactory;
+	private readonly linePositionMapperFactory: ILineMapperFactory;
 
-	private hiddenAreasIds: string[];
+	private hiddenAreasIds!: string[];
 
 	constructor(model: ITextModel, linePositionMapperFactory: ILineMapperFactory, tabSize: number, wrappingColumn: number, columnsForFullWidthChar: number, wrappingIndent: WrappingIndent) {
 		this.model = model;
@@ -738,9 +735,9 @@ export class SplitLinesCollection implements IViewModelLinesCollection {
 	public convertModelPositionToViewPosition(_modelLineNumber: number, _modelColumn: number): Position {
 		this._ensureValidState();
 
-		let validPosition = this.model.validatePosition(new Position(_modelLineNumber, _modelColumn));
-		let inputLineNumber = validPosition.lineNumber;
-		let inputColumn = validPosition.column;
+		const validPosition = this.model.validatePosition(new Position(_modelLineNumber, _modelColumn));
+		const inputLineNumber = validPosition.lineNumber;
+		const inputColumn = validPosition.column;
 
 		let lineIndex = inputLineNumber - 1, lineIndexChanged = false;
 		while (lineIndex > 0 && !this.lines[lineIndex].isVisible()) {
@@ -752,7 +749,7 @@ export class SplitLinesCollection implements IViewModelLinesCollection {
 			// console.log('in -> out ' + inputLineNumber + ',' + inputColumn + ' ===> ' + 1 + ',' + 1);
 			return new Position(1, 1);
 		}
-		let deltaLineNumber = 1 + (lineIndex === 0 ? 0 : this.prefixSumComputer.getAccumulatedValue(lineIndex - 1));
+		const deltaLineNumber = 1 + (lineIndex === 0 ? 0 : this.prefixSumComputer.getAccumulatedValue(lineIndex - 1));
 
 		let r: Position;
 		if (lineIndexChanged) {
@@ -763,6 +760,19 @@ export class SplitLinesCollection implements IViewModelLinesCollection {
 
 		// console.log('in -> out ' + inputLineNumber + ',' + inputColumn + ' ===> ' + r.lineNumber + ',' + r);
 		return r;
+	}
+
+	public convertModelRangeToViewRange(modelRange: Range): Range {
+		let start = this.convertModelPositionToViewPosition(modelRange.startLineNumber, modelRange.startColumn);
+		let end = this.convertModelPositionToViewPosition(modelRange.endLineNumber, modelRange.endColumn);
+		if (modelRange.startLineNumber === modelRange.endLineNumber && start.lineNumber !== end.lineNumber) {
+			// This is a single line range that ends up taking more lines due to wrapping
+			if (end.column === this.getViewLineMinColumn(end.lineNumber)) {
+				// the end column lands on the first column of the next line
+				return new Range(start.lineNumber, start.column, end.lineNumber - 1, this.getViewLineMaxColumn(end.lineNumber - 1));
+			}
+		}
+		return new Range(start.lineNumber, start.column, end.lineNumber, end.column);
 	}
 
 	private _getViewLineNumberForModelPosition(inputLineNumber: number, inputColumn: number): number {
@@ -1001,11 +1011,11 @@ class InvisibleIdentitySplitLine implements ISplitLine {
 
 export class SplitLine implements ISplitLine {
 
-	private positionMapper: ILineMapping;
-	private outputLineCount: number;
+	private readonly positionMapper: ILineMapping;
+	private readonly outputLineCount: number;
 
-	private wrappedIndent: string;
-	private wrappedIndentLength: number;
+	private readonly wrappedIndent: string;
+	private readonly wrappedIndentLength: number;
 	private _isVisible: boolean;
 
 	constructor(positionMapper: ILineMapping, isVisible: boolean) {
@@ -1401,9 +1411,6 @@ export class IdentityLinesCollection implements IViewModelLinesCollection {
 class OverviewRulerDecorations {
 
 	readonly result: IOverviewRulerDecorations = Object.create(null);
-
-	constructor() {
-	}
 
 	public accept(color: string, startLineNumber: number, endLineNumber: number, lane: number): void {
 		let prev = this.result[color];

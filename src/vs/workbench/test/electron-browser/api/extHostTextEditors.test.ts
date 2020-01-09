@@ -3,32 +3,33 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as assert from 'assert';
-import * as extHostTypes from 'vs/workbench/api/node/extHostTypes';
-import { MainContext, MainThreadTextEditorsShape, WorkspaceEditDto } from 'vs/workbench/api/node/extHost.protocol';
+import * as extHostTypes from 'vs/workbench/api/common/extHostTypes';
+import { MainContext, MainThreadTextEditorsShape, IWorkspaceEditDto } from 'vs/workbench/api/common/extHost.protocol';
 import { URI } from 'vs/base/common/uri';
 import { mock } from 'vs/workbench/test/electron-browser/api/mock';
-import { ExtHostDocumentsAndEditors } from 'vs/workbench/api/node/extHostDocumentsAndEditors';
+import { ExtHostDocumentsAndEditors } from 'vs/workbench/api/common/extHostDocumentsAndEditors';
 import { SingleProxyRPCProtocol, TestRPCProtocol } from 'vs/workbench/test/electron-browser/api/testRPCProtocol';
-import { ExtHostEditors } from 'vs/workbench/api/node/extHostTextEditors';
+import { ExtHostEditors } from 'vs/workbench/api/common/extHostTextEditors';
 import { ResourceTextEdit } from 'vs/editor/common/modes';
+import { NullLogService } from 'vs/platform/log/common/log';
 
 suite('ExtHostTextEditors.applyWorkspaceEdit', () => {
 
 	const resource = URI.parse('foo:bar');
 	let editors: ExtHostEditors;
-	let workspaceResourceEdits: WorkspaceEditDto;
+	let workspaceResourceEdits: IWorkspaceEditDto;
 
 	setup(() => {
 		workspaceResourceEdits = null!;
 
 		let rpcProtocol = new TestRPCProtocol();
 		rpcProtocol.set(MainContext.MainThreadTextEditors, new class extends mock<MainThreadTextEditorsShape>() {
-			$tryApplyWorkspaceEdit(_workspaceResourceEdits: WorkspaceEditDto): Promise<boolean> {
+			$tryApplyWorkspaceEdit(_workspaceResourceEdits: IWorkspaceEditDto): Promise<boolean> {
 				workspaceResourceEdits = _workspaceResourceEdits;
 				return Promise.resolve(true);
 			}
 		});
-		const documentsAndEditors = new ExtHostDocumentsAndEditors(SingleProxyRPCProtocol(null));
+		const documentsAndEditors = new ExtHostDocumentsAndEditors(SingleProxyRPCProtocol(null), new NullLogService());
 		documentsAndEditors.$acceptDocumentsAndEditorsDelta({
 			addedDocuments: [{
 				isDirty: false,

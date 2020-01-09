@@ -13,15 +13,18 @@ interface PackageInfo {
 	readonly aiKey: string;
 }
 
-export default class TelemetryReporter {
-	private _reporter: VsCodeTelemetryReporter | null = null;
+export interface TelemetryProperties {
+	readonly [prop: string]: string | number | undefined;
+}
 
-	dispose() {
-		if (this._reporter) {
-			this._reporter.dispose();
-			this._reporter = null;
-		}
-	}
+export interface TelemetryReporter {
+	logTelemetry(eventName: string, properties?: TelemetryProperties): void;
+
+	dispose(): void;
+}
+
+export class VSCodeTelemetryReporter implements TelemetryReporter {
+	private _reporter: VsCodeTelemetryReporter | null = null;
 
 	constructor(
 		private readonly clientVersionDelegate: () => string
@@ -42,6 +45,13 @@ export default class TelemetryReporter {
 			properties['version'] = this.clientVersionDelegate();
 
 			reporter.sendTelemetryEvent(eventName, properties);
+		}
+	}
+
+	public dispose() {
+		if (this._reporter) {
+			this._reporter.dispose();
+			this._reporter = null;
 		}
 	}
 

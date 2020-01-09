@@ -3,29 +3,35 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CommandsRegistry, ICommandHandler } from 'vs/platform/commands/common/commands';
-import { ContextKeyExpr, RawContextKey } from 'vs/platform/contextkey/common/contextkey';
+import 'vs/workbench/contrib/markers/browser/markersFileDecorations';
+import { ContextKeyExpr } from 'vs/platform/contextkey/common/contextkey';
 import { Extensions, IConfigurationRegistry } from 'vs/platform/configuration/common/configurationRegistry';
 import { IPanelService } from 'vs/workbench/services/panel/common/panelService';
 import { IWorkbenchActionRegistry, Extensions as ActionExtensions } from 'vs/workbench/common/actions';
-import { KeybindingsRegistry, KeybindingWeight, IKeybindings } from 'vs/platform/keybinding/common/keybindingsRegistry';
+import { KeybindingsRegistry, KeybindingWeight } from 'vs/platform/keybinding/common/keybindingsRegistry';
 import { KeyCode, KeyMod } from 'vs/base/common/keyCodes';
 import { localize } from 'vs/nls';
 import { Marker, RelatedInformation } from 'vs/workbench/contrib/markers/browser/markersModel';
-import { MarkersPanel } from 'vs/workbench/contrib/markers/browser/markersPanel';
-import { MenuId, MenuRegistry, SyncActionDescriptor, ILocalizedString } from 'vs/platform/actions/common/actions';
-import { PanelRegistry, Extensions as PanelExtensions, PanelDescriptor } from 'vs/workbench/browser/panel';
+import { MarkersView, getMarkersView } from 'vs/workbench/contrib/markers/browser/markersView';
+import { MenuId, MenuRegistry, SyncActionDescriptor, registerAction } from 'vs/platform/actions/common/actions';
+import { TogglePanelAction } from 'vs/workbench/browser/panel';
 import { Registry } from 'vs/platform/registry/common/platform';
-import { ToggleMarkersPanelAction, ShowProblemsPanelAction } from 'vs/workbench/contrib/markers/browser/markersPanelActions';
+import { ShowProblemsPanelAction } from 'vs/workbench/contrib/markers/browser/markersViewActions';
 import Constants from 'vs/workbench/contrib/markers/browser/constants';
 import Messages from 'vs/workbench/contrib/markers/browser/messages';
-import { IWorkbenchContributionsRegistry, Extensions as WorkbenchExtensions } from 'vs/workbench/common/contributions';
+import { IWorkbenchContributionsRegistry, Extensions as WorkbenchExtensions, IWorkbenchContribution } from 'vs/workbench/common/contributions';
 import { IMarkersWorkbenchService, MarkersWorkbenchService, ActivityUpdater } from 'vs/workbench/contrib/markers/browser/markers';
 import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
 import { LifecyclePhase } from 'vs/platform/lifecycle/common/lifecycle';
-
-import './markersFileDecorations';
 import { IClipboardService } from 'vs/platform/clipboard/common/clipboardService';
+import { ActivePanelContext } from 'vs/workbench/common/panel';
+import { Disposable } from 'vs/base/common/lifecycle';
+import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment, IStatusbarEntry } from 'vs/workbench/services/statusbar/common/statusbar';
+import { IMarkerService, MarkerStatistics } from 'vs/platform/markers/common/markers';
+import { CommandsRegistry } from 'vs/platform/commands/common/commands';
+import { ViewContainer, IViewContainersRegistry, Extensions as ViewContainerExtensions, ViewContainerLocation, IViewsRegistry } from 'vs/workbench/common/views';
+import { ViewPaneContainer } from 'vs/workbench/browser/parts/views/viewPaneContainer';
+import { IWorkbenchLayoutService } from 'vs/workbench/services/layout/browser/layoutService';
 
 registerSingleton(IMarkersWorkbenchService, MarkersWorkbenchService, false);
 
@@ -38,8 +44,8 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 		primary: KeyMod.WinCtrl | KeyCode.Enter
 	},
 	handler: (accessor, args: any) => {
-		const markersPanel = (<MarkersPanel>accessor.get(IPanelService).getActivePanel());
-		markersPanel.openFileAtElement(markersPanel.getFocusElement(), false, true, true);
+		const markersView = getMarkersView(accessor.get(IPanelService))!;
+		markersView.openFileAtElement(markersView.getFocusElement(), false, true, true);
 	}
 });
 
@@ -59,10 +65,10 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 	when: Constants.MarkerFocusContextKey,
 	primary: KeyMod.CtrlCmd | KeyCode.US_DOT,
 	handler: (accessor, args: any) => {
-		const markersPanel = (<MarkersPanel>accessor.get(IPanelService).getActivePanel());
-		const focusedElement = markersPanel.getFocusElement();
+		const markersView = getMarkersView(accessor.get(IPanelService))!;
+		const focusedElement = markersView.getFocusElement();
 		if (focusedElement instanceof Marker) {
-			markersPanel.showQuickFixes(focusedElement);
+			markersView.showQuickFixes(focusedElement);
 		}
 	}
 });
@@ -78,20 +84,46 @@ Registry.as<IConfigurationRegistry>(Extensions.Configuration).registerConfigurat
 			'description': Messages.PROBLEMS_PANEL_CONFIGURATION_AUTO_REVEAL,
 			'type': 'boolean',
 			'default': true
+		},
+		'problems.showCurrentInStatus': {
+			'description': Messages.PROBLEMS_PANEL_CONFIGURATION_SHOW_CURRENT_STATUS,
+			'type': 'boolean',
+			'default': false
 		}
 	}
 });
 
+class ToggleMarkersPanelAction extends TogglePanelAction {
 
-// markers panel
-Registry.as<PanelRegistry>(PanelExtensions.Panels).registerPanel(new PanelDescriptor(
-	MarkersPanel,
-	Constants.MARKERS_PANEL_ID,
-	Messages.MARKERS_PANEL_TITLE_PROBLEMS,
-	'markersPanel',
-	10,
-	ToggleMarkersPanelAction.ID
-));
+	public static readonly ID = 'workbench.actions.view.problems';
+	public static readonly LABEL = Messages.MARKERS_PANEL_TOGGLE_LABEL;
+
+	constructor(id: string, label: string,
+		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
+		@IPanelService panelService: IPanelService
+	) {
+		super(id, label, Constants.MARKERS_PANEL_ID, panelService, layoutService);
+	}
+}
+
+// markers view container
+const VIEW_CONTAINER: ViewContainer = Registry.as<IViewContainersRegistry>(ViewContainerExtensions.ViewContainersRegistry).registerViewContainer({
+	id: Constants.MARKERS_PANEL_ID,
+	name: Messages.MARKERS_PANEL_TITLE_PROBLEMS,
+	ctorDescriptor: { ctor: ViewPaneContainer, arguments: [Constants.MARKERS_PANEL_ID, Constants.MARKERS_PANEL_STORAGE_ID, { mergeViewWithContainerWhenSingleView: true, donotShowContainerTitleWhenMergedWithContainer: true }] },
+	focusCommand: {
+		id: ToggleMarkersPanelAction.ID, keybindings: {
+			primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KEY_M
+		}
+	}
+}, ViewContainerLocation.Panel);
+
+Registry.as<IViewsRegistry>(ViewContainerExtensions.ViewsRegistry).registerViews([{
+	id: Constants.MARKERS_VIEW_ID,
+	name: Messages.MARKERS_PANEL_TITLE_PROBLEMS,
+	canToggleVisibility: false,
+	ctorDescriptor: { ctor: MarkersView },
+}], VIEW_CONTAINER);
 
 // workbench
 const workbenchRegistry = Registry.as<IWorkbenchContributionsRegistry>(WorkbenchExtensions.Workbench);
@@ -99,15 +131,15 @@ workbenchRegistry.registerWorkbenchContribution(ActivityUpdater, LifecyclePhase.
 
 // actions
 const registry = Registry.as<IWorkbenchActionRegistry>(ActionExtensions.WorkbenchActions);
-registry.registerWorkbenchAction(new SyncActionDescriptor(ToggleMarkersPanelAction, ToggleMarkersPanelAction.ID, ToggleMarkersPanelAction.LABEL, {
+registry.registerWorkbenchAction(SyncActionDescriptor.create(ToggleMarkersPanelAction, ToggleMarkersPanelAction.ID, ToggleMarkersPanelAction.LABEL, {
 	primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KEY_M
 }), 'View: Toggle Problems (Errors, Warnings, Infos)', Messages.MARKERS_PANEL_VIEW_CATEGORY);
-registry.registerWorkbenchAction(new SyncActionDescriptor(ShowProblemsPanelAction, ShowProblemsPanelAction.ID, ShowProblemsPanelAction.LABEL), 'View: Focus Problems (Errors, Warnings, Infos)', Messages.MARKERS_PANEL_VIEW_CATEGORY);
+registry.registerWorkbenchAction(SyncActionDescriptor.create(ShowProblemsPanelAction, ShowProblemsPanelAction.ID, ShowProblemsPanelAction.LABEL), 'View: Focus Problems (Errors, Warnings, Infos)', Messages.MARKERS_PANEL_VIEW_CATEGORY);
 registerAction({
 	id: Constants.MARKER_COPY_ACTION_ID,
 	title: { value: localize('copyMarker', "Copy"), original: 'Copy' },
-	handler(accessor) {
-		copyMarker(accessor.get(IPanelService), accessor.get(IClipboardService));
+	async handler(accessor) {
+		await copyMarker(accessor.get(IPanelService), accessor.get(IClipboardService));
 	},
 	menu: {
 		menuId: MenuId.ProblemsPanelContext,
@@ -115,6 +147,7 @@ registerAction({
 		group: 'navigation'
 	},
 	keybinding: {
+		weight: KeybindingWeight.WorkbenchContrib,
 		keys: {
 			primary: KeyMod.CtrlCmd | KeyCode.KEY_C
 		},
@@ -124,8 +157,8 @@ registerAction({
 registerAction({
 	id: Constants.MARKER_COPY_MESSAGE_ACTION_ID,
 	title: { value: localize('copyMessage', "Copy Message"), original: 'Copy Message' },
-	handler(accessor) {
-		copyMessage(accessor.get(IPanelService), accessor.get(IClipboardService));
+	async handler(accessor) {
+		await copyMessage(accessor.get(IPanelService), accessor.get(IClipboardService));
 	},
 	menu: {
 		menuId: MenuId.ProblemsPanelContext,
@@ -136,8 +169,8 @@ registerAction({
 registerAction({
 	id: Constants.RELATED_INFORMATION_COPY_MESSAGE_ACTION_ID,
 	title: { value: localize('copyMessage', "Copy Message"), original: 'Copy Message' },
-	handler(accessor) {
-		copyRelatedInformationMessage(accessor.get(IPanelService), accessor.get(IClipboardService));
+	async handler(accessor) {
+		await copyRelatedInformationMessage(accessor.get(IPanelService), accessor.get(IClipboardService));
 	},
 	menu: {
 		menuId: MenuId.ProblemsPanelContext,
@@ -152,6 +185,7 @@ registerAction({
 	},
 	keybinding: {
 		when: Constants.MarkerPanelFilterFocusContextKey,
+		weight: KeybindingWeight.WorkbenchContrib,
 		keys: {
 			primary: KeyMod.CtrlCmd | KeyCode.DownArrow
 		},
@@ -164,6 +198,7 @@ registerAction({
 	},
 	keybinding: {
 		when: Constants.MarkerPanelFocusContextKey,
+		weight: KeybindingWeight.WorkbenchContrib,
 		keys: {
 			primary: KeyMod.CtrlCmd | KeyCode.KEY_F
 		},
@@ -172,135 +207,75 @@ registerAction({
 registerAction({
 	id: Constants.MARKERS_PANEL_SHOW_MULTILINE_MESSAGE,
 	handler(accessor) {
-		const panelService = accessor.get(IPanelService);
-		const panel = panelService.getActivePanel();
-		if (panel instanceof MarkersPanel) {
-			panel.markersViewModel.multiline = true;
+		const markersView = getMarkersView(accessor.get(IPanelService));
+		if (markersView) {
+			markersView.markersViewModel.multiline = true;
 		}
 	},
 	title: { value: localize('show multiline', "Show message in multiple lines"), original: 'Problems: Show message in multiple lines' },
 	category: localize('problems', "Problems"),
 	menu: {
 		menuId: MenuId.CommandPalette,
-		when: new RawContextKey<string>('activePanel', Constants.MARKERS_PANEL_ID)
+		when: ActivePanelContext.isEqualTo(Constants.MARKERS_PANEL_ID)
 	}
 });
 registerAction({
 	id: Constants.MARKERS_PANEL_SHOW_SINGLELINE_MESSAGE,
 	handler(accessor) {
-		const panelService = accessor.get(IPanelService);
-		const panel = panelService.getActivePanel();
-		if (panel instanceof MarkersPanel) {
-			panel.markersViewModel.multiline = false;
+		const markersView = getMarkersView(accessor.get(IPanelService));
+		if (markersView) {
+			markersView.markersViewModel.multiline = false;
 		}
 	},
 	title: { value: localize('show singleline', "Show message in single line"), original: 'Problems: Show message in single line' },
 	category: localize('problems', "Problems"),
 	menu: {
 		menuId: MenuId.CommandPalette,
-		when: new RawContextKey<string>('activePanel', Constants.MARKERS_PANEL_ID)
+		when: ActivePanelContext.isEqualTo(Constants.MARKERS_PANEL_ID)
 	}
 });
 
-function copyMarker(panelService: IPanelService, clipboardService: IClipboardService) {
-	const activePanel = panelService.getActivePanel();
-	if (activePanel instanceof MarkersPanel) {
-		const element = (<MarkersPanel>activePanel).getFocusElement();
+async function copyMarker(panelService: IPanelService, clipboardService: IClipboardService) {
+	const markersView = getMarkersView(panelService);
+	if (markersView) {
+		const element = markersView.getFocusElement();
 		if (element instanceof Marker) {
-			clipboardService.writeText(`${element}`);
+			await clipboardService.writeText(`${element}`);
 		}
 	}
 }
 
-function copyMessage(panelService: IPanelService, clipboardService: IClipboardService) {
-	const activePanel = panelService.getActivePanel();
-	if (activePanel instanceof MarkersPanel) {
-		const element = (<MarkersPanel>activePanel).getFocusElement();
+async function copyMessage(panelService: IPanelService, clipboardService: IClipboardService) {
+	const markersView = getMarkersView(panelService);
+	if (markersView) {
+		const element = markersView.getFocusElement();
 		if (element instanceof Marker) {
-			clipboardService.writeText(element.marker.message);
+			await clipboardService.writeText(element.marker.message);
 		}
 	}
 }
 
-function copyRelatedInformationMessage(panelService: IPanelService, clipboardService: IClipboardService) {
-	const activePanel = panelService.getActivePanel();
-	if (activePanel instanceof MarkersPanel) {
-		const element = (<MarkersPanel>activePanel).getFocusElement();
+async function copyRelatedInformationMessage(panelService: IPanelService, clipboardService: IClipboardService) {
+	const markersView = getMarkersView(panelService);
+	if (markersView) {
+		const element = markersView.getFocusElement();
 		if (element instanceof RelatedInformation) {
-			clipboardService.writeText(element.raw.message);
+			await clipboardService.writeText(element.raw.message);
 		}
 	}
 }
 
 function focusProblemsView(panelService: IPanelService) {
-	const activePanel = panelService.getActivePanel();
-	if (activePanel instanceof MarkersPanel) {
-		activePanel.focus();
+	const markersView = getMarkersView(panelService);
+	if (markersView) {
+		markersView.focus();
 	}
 }
 
-function focusProblemsFilter(panelService: IPanelService) {
-	const activePanel = panelService.getActivePanel();
-	if (activePanel instanceof MarkersPanel) {
-		activePanel.focusFilter();
-	}
-}
-
-interface IActionDescriptor {
-	id: string;
-	handler: ICommandHandler;
-
-	// ICommandUI
-	title?: ILocalizedString;
-	category?: string;
-	f1?: boolean;
-
-	//
-	menu?: {
-		menuId: MenuId,
-		when?: ContextKeyExpr;
-		group?: string;
-	};
-
-	//
-	keybinding?: {
-		when?: ContextKeyExpr;
-		weight?: number;
-		keys: IKeybindings;
-	};
-}
-
-function registerAction(desc: IActionDescriptor) {
-
-	const { id, handler, title, category, menu, keybinding } = desc;
-
-	// 1) register as command
-	CommandsRegistry.registerCommand(id, handler);
-
-	// 2) menus
-	let command = { id, title, category };
-	if (menu) {
-		let { menuId, when, group } = menu;
-		MenuRegistry.appendMenuItem(menuId, {
-			command,
-			when,
-			group
-		});
-	}
-
-	// 3) keybindings
-	if (keybinding) {
-		let { when, weight, keys } = keybinding;
-		KeybindingsRegistry.registerKeybindingRule({
-			id,
-			when,
-			weight,
-			primary: keys.primary,
-			secondary: keys.secondary,
-			linux: keys.linux,
-			mac: keys.mac,
-			win: keys.win
-		});
+function focusProblemsFilter(panelService: IPanelService): void {
+	const markersView = getMarkersView(panelService);
+	if (markersView) {
+		markersView.focusFilter();
 	}
 }
 
@@ -312,3 +287,86 @@ MenuRegistry.appendMenuItem(MenuId.MenubarViewMenu, {
 	},
 	order: 4
 });
+
+CommandsRegistry.registerCommand('workbench.actions.view.toggleProblems', accessor => {
+	const panelService = accessor.get(IPanelService);
+	const panel = accessor.get(IPanelService).getActivePanel();
+	if (panel && panel.getId() === Constants.MARKERS_PANEL_ID) {
+		panelService.hideActivePanel();
+	} else {
+		panelService.openPanel(Constants.MARKERS_PANEL_ID, true);
+	}
+});
+
+class MarkersStatusBarContributions extends Disposable implements IWorkbenchContribution {
+
+	private markersStatusItem: IStatusbarEntryAccessor;
+
+	constructor(
+		@IMarkerService private readonly markerService: IMarkerService,
+		@IStatusbarService private readonly statusbarService: IStatusbarService
+	) {
+		super();
+		this.markersStatusItem = this._register(this.statusbarService.addEntry(this.getMarkersItem(), 'status.problems', localize('status.problems', "Problems"), StatusbarAlignment.LEFT, 50 /* Medium Priority */));
+		this.markerService.onMarkerChanged(() => this.markersStatusItem.update(this.getMarkersItem()));
+	}
+
+	private getMarkersItem(): IStatusbarEntry {
+		const markersStatistics = this.markerService.getStatistics();
+		return {
+			text: this.getMarkersText(markersStatistics),
+			tooltip: this.getMarkersTooltip(markersStatistics),
+			command: 'workbench.actions.view.toggleProblems'
+		};
+	}
+
+	private getMarkersTooltip(stats: MarkerStatistics): string {
+		const errorTitle = (n: number) => localize('totalErrors', "{0} Errors", n);
+		const warningTitle = (n: number) => localize('totalWarnings', "{0} Warnings", n);
+		const infoTitle = (n: number) => localize('totalInfos', "{0} Infos", n);
+
+		const titles: string[] = [];
+
+		if (stats.errors > 0) {
+			titles.push(errorTitle(stats.errors));
+		}
+
+		if (stats.warnings > 0) {
+			titles.push(warningTitle(stats.warnings));
+		}
+
+		if (stats.infos > 0) {
+			titles.push(infoTitle(stats.infos));
+		}
+
+		if (titles.length === 0) {
+			return localize('noProblems', "No Problems");
+		}
+
+		return titles.join(', ');
+	}
+
+	private getMarkersText(stats: MarkerStatistics): string {
+		const problemsText: string[] = [];
+
+		// Errors
+		problemsText.push('$(error) ' + this.packNumber(stats.errors));
+
+		// Warnings
+		problemsText.push('$(warning) ' + this.packNumber(stats.warnings));
+
+		// Info (only if any)
+		if (stats.infos > 0) {
+			problemsText.push('$(info) ' + this.packNumber(stats.infos));
+		}
+
+		return problemsText.join(' ');
+	}
+
+	private packNumber(n: number): string {
+		const manyProblems = localize('manyProblems', "10K+");
+		return n > 9999 ? manyProblems : n > 999 ? n.toString().charAt(0) + 'K' : n.toString();
+	}
+}
+
+workbenchRegistry.registerWorkbenchContribution(MarkersStatusBarContributions, LifecyclePhase.Restored);

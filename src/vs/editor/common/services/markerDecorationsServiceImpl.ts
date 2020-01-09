@@ -6,7 +6,7 @@
 import { IMarkerService, IMarker, MarkerSeverity, MarkerTag } from 'vs/platform/markers/common/markers';
 import { Disposable, toDisposable } from 'vs/base/common/lifecycle';
 import { URI } from 'vs/base/common/uri';
-import { IModelDeltaDecoration, ITextModel, IModelDecorationOptions, TrackedRangeStickiness, OverviewRulerLane, IModelDecoration } from 'vs/editor/common/model';
+import { IModelDeltaDecoration, ITextModel, IModelDecorationOptions, TrackedRangeStickiness, OverviewRulerLane, IModelDecoration, MinimapPosition, IModelDecorationMinimapOptions } from 'vs/editor/common/model';
 import { ClassName } from 'vs/editor/common/model/intervalTree';
 import { themeColorFromId, ThemeColor } from 'vs/platform/theme/common/themeService';
 import { overviewRulerWarning, overviewRulerInfo, overviewRulerError } from 'vs/editor/common/view/editorColorRegistry';
@@ -15,6 +15,9 @@ import { Range } from 'vs/editor/common/core/range';
 import { keys } from 'vs/base/common/map';
 import { IMarkerDecorationsService } from 'vs/editor/common/services/markersDecorationService';
 import { Schemas } from 'vs/base/common/network';
+import { Emitter, Event } from 'vs/base/common/event';
+import { withUndefinedAsNull } from 'vs/base/common/types';
+import { minimapWarning, minimapError } from 'vs/platform/theme/common/colorRegistry';
 
 function MODEL_ID(resource: URI): string {
 	return resource.toString();
@@ -44,13 +47,27 @@ class MarkerDecorations extends Disposable {
 	getMarker(decoration: IModelDecoration): IMarker | undefined {
 		return this._markersData.get(decoration.id);
 	}
+
+	getMarkers(): [Range, IMarker][] {
+		const res: [Range, IMarker][] = [];
+		this._markersData.forEach((marker, id) => {
+			let range = this.model.getDecorationRange(id);
+			if (range) {
+				res.push([range, marker]);
+			}
+		});
+		return res;
+	}
 }
 
 export class MarkerDecorationsService extends Disposable implements IMarkerDecorationsService {
 
-	_serviceBrand: any;
+	_serviceBrand: undefined;
 
-	private readonly _markerDecorations: Map<string, MarkerDecorations> = new Map<string, MarkerDecorations>();
+	private readonly _onDidChangeMarker = this._register(new Emitter<ITextModel>());
+	readonly onDidChangeMarker: Event<ITextModel> = this._onDidChangeMarker.event;
+
+	private readonly _markerDecorations = new Map<string, MarkerDecorations>();
 
 	constructor(
 		@IModelService modelService: IModelService,
@@ -63,16 +80,27 @@ export class MarkerDecorationsService extends Disposable implements IMarkerDecor
 		this._register(this._markerService.onMarkerChanged(this._handleMarkerChange, this));
 	}
 
-	getMarker(model: ITextModel, decoration: IModelDecoration): IMarker | null {
-		const markerDecorations = this._markerDecorations.get(MODEL_ID(model.uri));
-		return markerDecorations ? markerDecorations.getMarker(decoration) || null : null;
+	dispose() {
+		super.dispose();
+		this._markerDecorations.forEach(value => value.dispose());
+		this._markerDecorations.clear();
 	}
 
-	private _handleMarkerChange(changedResources: URI[]): void {
+	getMarker(model: ITextModel, decoration: IModelDecoration): IMarker | null {
+		const markerDecorations = this._markerDecorations.get(MODEL_ID(model.uri));
+		return markerDecorations ? withUndefinedAsNull(markerDecorations.getMarker(decoration)) : null;
+	}
+
+	getLiveMarkers(model: ITextModel): [Range, IMarker][] {
+		const markerDecorations = this._markerDecorations.get(MODEL_ID(model.uri));
+		return markerDecorations ? markerDecorations.getMarkers() : [];
+	}
+
+	private _handleMarkerChange(changedResources: readonly URI[]): void {
 		changedResources.forEach((resource) => {
 			const markerDecorations = this._markerDecorations.get(MODEL_ID(resource));
 			if (markerDecorations) {
-				this.updateDecorations(markerDecorations);
+				this._updateDecorations(markerDecorations);
 			}
 		});
 	}
@@ -80,7 +108,7 @@ export class MarkerDecorationsService extends Disposable implements IMarkerDecor
 	private _onModelAdded(model: ITextModel): void {
 		const markerDecorations = new MarkerDecorations(model);
 		this._markerDecorations.set(MODEL_ID(model.uri), markerDecorations);
-		this.updateDecorations(markerDecorations);
+		this._updateDecorations(markerDecorations);
 	}
 
 	private _onModelRemoved(model: ITextModel): void {
@@ -100,7 +128,7 @@ export class MarkerDecorationsService extends Disposable implements IMarkerDecor
 		}
 	}
 
-	private updateDecorations(markerDecorations: MarkerDecorations): void {
+	private _updateDecorations(markerDecorations: MarkerDecorations): void {
 		// Limit to the first 500 errors/warnings
 		const markers = this._markerService.read({ resource: markerDecorations.model.uri, take: 500 });
 		let newModelDecorations: IModelDeltaDecoration[] = markers.map((marker) => {
@@ -110,6 +138,7 @@ export class MarkerDecorationsService extends Disposable implements IMarkerDecor
 			};
 		});
 		markerDecorations.update(markers, newModelDecorations);
+		this._onDidChangeMarker.fire(markerDecorations.model);
 	}
 
 	private _createDecorationRange(model: ITextModel, rawMarker: IMarker): Range {
@@ -161,6 +190,7 @@ export class MarkerDecorationsService extends Disposable implements IMarkerDecor
 		let color: ThemeColor | undefined = undefined;
 		let zIndex: number;
 		let inlineClassName: string | undefined = undefined;
+		let minimap: IModelDecorationMinimapOptions | undefined;
 
 		switch (marker.severity) {
 			case MarkerSeverity.Hint:
@@ -175,6 +205,10 @@ export class MarkerDecorationsService extends Disposable implements IMarkerDecor
 				className = ClassName.EditorWarningDecoration;
 				color = themeColorFromId(overviewRulerWarning);
 				zIndex = 20;
+				minimap = {
+					color: themeColorFromId(minimapWarning),
+					position: MinimapPosition.Inline
+				};
 				break;
 			case MarkerSeverity.Info:
 				className = ClassName.EditorInfoDecoration;
@@ -186,12 +220,19 @@ export class MarkerDecorationsService extends Disposable implements IMarkerDecor
 				className = ClassName.EditorErrorDecoration;
 				color = themeColorFromId(overviewRulerError);
 				zIndex = 30;
+				minimap = {
+					color: themeColorFromId(minimapError),
+					position: MinimapPosition.Inline
+				};
 				break;
 		}
 
 		if (marker.tags) {
 			if (marker.tags.indexOf(MarkerTag.Unnecessary) !== -1) {
 				inlineClassName = ClassName.EditorUnnecessaryInlineDecoration;
+			}
+			if (marker.tags.indexOf(MarkerTag.Deprecated) !== -1) {
+				inlineClassName = ClassName.EditorDeprecatedInlineDecoration;
 			}
 		}
 
@@ -203,6 +244,7 @@ export class MarkerDecorationsService extends Disposable implements IMarkerDecor
 				color,
 				position: OverviewRulerLane.Right
 			},
+			minimap,
 			zIndex,
 			inlineClassName,
 		};
